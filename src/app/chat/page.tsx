@@ -25,9 +25,15 @@ export default function ChatPage() {
   const supabase = createClient()
 
   const scrollToBottom = useCallback(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
+    // Use requestAnimationFrame to ensure DOM has rendered
+    requestAnimationFrame(() => {
+      if (scrollRef.current) {
+        scrollRef.current.scrollTo({
+          top: scrollRef.current.scrollHeight,
+          behavior: "smooth",
+        })
+      }
+    })
   }, [])
 
   useEffect(() => {
@@ -46,13 +52,22 @@ export default function ChatPage() {
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages, scrollToBottom])
+  }, [messages, loading, scrollToBottom])
 
   async function sendMessage() {
     const content = input.trim()
     if (!content || loading) return
 
     setInput("")
+
+    // Optimistic: show user message immediately
+    const tempUserMsg: Message = {
+      id: "temp-" + Date.now(),
+      role: "user",
+      content,
+      created_at: new Date().toISOString(),
+    }
+    setMessages((prev) => [...prev, tempUserMsg])
     setLoading(true)
 
     try {
@@ -63,10 +78,17 @@ export default function ChatPage() {
       })
       const data = await res.json()
       if (data.userMessage && data.assistantMessage) {
-        setMessages((prev) => [...prev, data.userMessage, data.assistantMessage])
+        // Replace temp message with real one + add assistant response
+        setMessages((prev) => [
+          ...prev.filter((m) => m.id !== tempUserMsg.id),
+          data.userMessage,
+          data.assistantMessage,
+        ])
       }
     } catch (error) {
       console.error("Failed to send message:", error)
+      // Remove temp message on error
+      setMessages((prev) => prev.filter((m) => m.id !== tempUserMsg.id))
     } finally {
       setLoading(false)
       textareaRef.current?.focus()
