@@ -41,7 +41,7 @@ interface Project {
   tech_stack: string[]
   repo_url: string | null
   live_url: string | null
-  category: "safesuites" | "motorola" | "personal" | "other"
+  category: "safesuites" | "motorola" | "personal" | "lucidstack" | "other"
   progress: number
   notes: string | null
   created_at: string
@@ -293,6 +293,7 @@ export default function ProjectsPage() {
                     className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-md text-white"
                   >
                     <option value="safesuites">SafeSuites</option>
+                    <option value="lucidstack">LucidStack</option>
                     <option value="motorola">Motorola</option>
                     <option value="personal">Personal</option>
                     <option value="other">Other</option>
@@ -387,6 +388,7 @@ export default function ProjectsPage() {
         <TabsList className="glass border border-white/10">
           <TabsTrigger value="all">All</TabsTrigger>
           <TabsTrigger value="safesuites">SafeSuites</TabsTrigger>
+          <TabsTrigger value="lucidstack">LucidStack</TabsTrigger>
           <TabsTrigger value="motorola">Motorola</TabsTrigger>
           <TabsTrigger value="personal">Personal</TabsTrigger>
           <TabsTrigger value="other">Other</TabsTrigger>
