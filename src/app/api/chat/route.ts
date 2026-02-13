@@ -222,8 +222,8 @@ export async function GET() {
   const { data, error } = await supabase
     .from("chat_messages")
     .select("*")
-    .order("created_at", { ascending: true })
-    .limit(100)
+    .order("created_at", { ascending: false })
+    .limit(200)
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })

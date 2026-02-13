@@ -45,13 +45,13 @@ export default function ChatPage() {
         const { data, error } = await supabase
           .from("chat_messages")
           .select("*")
-          .order("created_at", { ascending: true })
-          .limit(100)
+          .order("created_at", { ascending: false })
+          .limit(200)
         if (error) {
           console.error("Failed to load chat messages:", error)
         }
         if (data && data.length > 0) {
-          setMessages(data)
+          setMessages(data.reverse())
         }
       } catch (err) {
         console.error("Chat load error:", err)
