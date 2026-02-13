@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion"
 import { Send, Bot, User, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import { ScrollArea } from "@/components/ui/scroll-area"
+// import { ScrollArea } from "@/components/ui/scroll-area"
 import { createClient } from "@/lib/supabase/client"
 
 interface Message {
@@ -41,6 +41,7 @@ export default function ChatPage() {
       setInitialLoading(false)
     }
     loadMessages()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -81,7 +82,7 @@ export default function ChatPage() {
 
   function renderMarkdown(text: string) {
     // Basic markdown: bold, italic, code blocks, inline code
-    let html = text
+    const html = text
       .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="bg-black/40 rounded-lg p-3 my-2 overflow-x-auto text-sm"><code>$2</code></pre>')
       .replace(/`([^`]+)`/g, '<code class="bg-black/30 px-1.5 py-0.5 rounded text-sm text-blue-300">$1</code>')
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")

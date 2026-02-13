@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { motion } from "framer-motion"
 import { Brain, Pin, PinOff, Plus, Tag, Calendar, Loader2 } from "lucide-react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -41,6 +41,7 @@ export default function MemoryPage() {
     setLoading(false)
   }
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadEntries() }, [])
 
   async function addEntry() {

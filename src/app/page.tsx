@@ -75,6 +75,7 @@ export default function DashboardPage() {
       if (docs) setRecentDocs(docs)
     }
     loadData()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   return (
