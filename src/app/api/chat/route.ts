@@ -20,9 +20,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: userError.message }, { status: 500 })
   }
 
-  // Send to OpenClaw Gateway via WebSocket
+  // Send to OpenClaw Gateway
   let assistantContent: string
-
   try {
     assistantContent = await sendToGateway(content)
   } catch (error) {
@@ -30,7 +29,6 @@ export async function POST(req: NextRequest) {
     assistantContent = `⚠️ Could not reach the OpenClaw Gateway. Error: ${error instanceof Error ? error.message : "Unknown error"}`
   }
 
-  // Store assistant message
   const { data: assistantMessage, error: assistantError } = await supabase
     .from("chat_messages")
     .insert({ role: "assistant", content: assistantContent })
@@ -44,100 +42,111 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ userMessage, assistantMessage })
 }
 
-function generateId(): string {
+function genId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36)
 }
 
 async function sendToGateway(message: string): Promise<string> {
-  if (!GATEWAY_URL) {
-    throw new Error("OPENCLAW_GATEWAY_URL not configured")
-  }
+  if (!GATEWAY_URL) throw new Error("OPENCLAW_GATEWAY_URL not configured")
 
-  const wsUrl = GATEWAY_URL
-    .replace(/^https:\/\//, "wss://")
-    .replace(/^http:\/\//, "ws://")
+  const wsUrl = GATEWAY_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
 
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      ws.close()
-      reject(new Error("Gateway timeout (60s)"))
-    }, 60000)
+    const timeout = setTimeout(() => { ws.close(); reject(new Error("Gateway timeout (60s)")) }, 60000)
 
-    const ws = new WebSocket(wsUrl)
+    const ws = new WebSocket(wsUrl, {
+      headers: { "Origin": "https://jacob-command-center-y8us.vercel.app" }
+    })
+
     let responseText = ""
-    let connectNonce: string | null = null
-    let chatSendAcked = false
+    let connected = false
+    let chatAcked = false
+    let mainSessionKey = ""
 
-    function sendRequest(method: string, params: Record<string, unknown> = {}) {
-      const id = generateId()
-      ws.send(JSON.stringify({
-        type: "req",
-        id,
-        method,
-        params
-      }))
+    function send(method: string, params: Record<string, unknown>) {
+      const id = genId()
+      ws.send(JSON.stringify({ type: "req", id, method, params }))
       return id
     }
 
-    function doConnect() {
-      sendRequest("connect", {
-        auth: { token: GATEWAY_TOKEN },
-        ...(connectNonce ? { nonce: connectNonce } : {}),
-        userAgent: "jacob-command-center/1.0"
-      })
-    }
-
     ws.on("open", () => {
-      // Wait for challenge or send connect directly
-      // Gateway may send a challenge nonce first
-      // Set a small delay then connect if no challenge received
-      setTimeout(() => {
-        if (!connectNonce) {
-          doConnect()
-        }
-      }, 500)
+      // Wait for connect.challenge
     })
 
     ws.on("message", (data: Buffer | string) => {
       try {
         const msg = JSON.parse(data.toString())
 
-        // Handle challenge nonce
+        // Challenge → connect
         if (msg.type === "event" && msg.event === "connect.challenge") {
-          connectNonce = msg.payload?.nonce || null
-          doConnect()
-          return
-        }
-
-        // Handle connect response (success)
-        if (msg.type === "res" && msg.payload !== undefined && !chatSendAcked) {
-          // This is likely the connect ack, now send chat
-          sendRequest("chat.send", {
-            content: message,
-            source: "command-center"
+          send("connect", {
+            minProtocol: 3,
+            maxProtocol: 3,
+            client: {
+              id: "openclaw-control-ui",
+              version: "1.0.0",
+              platform: "linux",
+              mode: "webchat",
+              instanceId: "jcc-" + Date.now()
+            },
+            role: "operator",
+            scopes: ["operator.admin"],
+            caps: [],
+            auth: { token: GATEWAY_TOKEN },
+            userAgent: "jacob-command-center/1.0"
           })
           return
         }
 
-        // Handle chat.send ack
-        if (msg.type === "res" && !chatSendAcked) {
-          chatSendAcked = true
-          // Now wait for streaming events
+        // Connect response → send chat
+        if (msg.type === "res" && msg.ok === true && !connected) {
+          connected = true
+          // Extract mainSessionKey from hello payload
+          mainSessionKey = msg.payload?.session?.mainKey
+            ? `agent:main:${msg.payload.session.mainKey}`
+            : msg.payload?.session?.mainSessionKey || "agent:main:main"
+
+          send("chat.send", {
+            sessionKey: mainSessionKey,
+            message: message,
+            idempotencyKey: genId()
+          })
           return
         }
 
-        // Handle streaming chat events
+        // Connect error
+        if (msg.type === "res" && msg.ok === false && !connected) {
+          clearTimeout(timeout)
+          ws.close()
+          reject(new Error(msg.error?.message || "Gateway connect failed"))
+          return
+        }
+
+        // Chat.send ack
+        if (msg.type === "res" && msg.ok === true && connected && !chatAcked) {
+          chatAcked = true
+          return
+        }
+
+        // Chat.send error
+        if (msg.type === "res" && msg.ok === false && connected) {
+          clearTimeout(timeout)
+          ws.close()
+          reject(new Error(msg.error?.message || "chat.send failed"))
+          return
+        }
+
+        // Streaming chat events
         if (msg.type === "event" && msg.event === "chat") {
           const p = msg.payload || {}
 
-          // Accumulate text from various possible fields
-          if (p.delta) responseText += p.delta
-          if (p.content && p.kind === "delta") responseText += p.content
-          if (p.text && p.kind === "delta") responseText += p.text
+          // Accumulate text
+          if (typeof p.delta === "string") responseText += p.delta
+          if (typeof p.text === "string" && p.kind === "delta") responseText += p.text
+          if (typeof p.content === "string" && p.kind === "delta") responseText += p.content
 
-          // Check for completion
-          if (p.kind === "done" || p.kind === "complete" || p.kind === "end" || p.done === true) {
-            // Use final content if provided and we have nothing yet
+          // Completion
+          if (p.kind === "done" || p.kind === "end" || p.kind === "complete" || p.done === true) {
             if (!responseText && p.content) responseText = p.content
             if (!responseText && p.text) responseText = p.text
             clearTimeout(timeout)
@@ -145,29 +154,18 @@ async function sendToGateway(message: string): Promise<string> {
             resolve(responseText || "No response received.")
             return
           }
-          return
-        }
-
-        // Handle error
-        if (msg.type === "res" && msg.ok === false) {
-          clearTimeout(timeout)
-          ws.close()
-          reject(new Error(msg.error?.message || "Gateway request failed"))
-          return
         }
 
       } catch {
-        // Non-JSON, ignore
+        // ignore parse errors
       }
     })
 
-    ws.on("close", (code: number, reason: Buffer) => {
+    ws.on("close", () => {
       clearTimeout(timeout)
-      if (responseText) {
-        resolve(responseText)
-      } else {
-        reject(new Error(`WebSocket closed (code: ${code}, reason: ${reason?.toString() || "none"})`))
-      }
+      if (responseText) resolve(responseText)
+      else if (!connected) reject(new Error("Connection closed before authentication"))
+      else reject(new Error("Connection closed without response"))
     })
 
     ws.on("error", (err: Error) => {
