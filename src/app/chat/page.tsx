@@ -190,7 +190,7 @@ export default function ChatPage() {
   function renderContent(text: string) {
     // Render images inline
     const parts = text.split(/(\[Screenshot uploaded: [^\]]+\])/)
-    return parts.map((part, i) => {
+    return parts.map((part) => {
       const match = part.match(/\[Screenshot uploaded: ([^\]]+)\]/)
       if (match) {
         return `<div class="my-2"><img src="${match[1]}" alt="Screenshot" class="max-w-full rounded-lg max-h-[300px] object-contain" /></div>`
