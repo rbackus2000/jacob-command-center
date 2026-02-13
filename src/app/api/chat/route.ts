@@ -45,31 +45,27 @@ function genId(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36)
 }
 
+function sendWs(ws: WebSocket, method: string, params: Record<string, unknown>): string {
+  const id = genId()
+  ws.send(JSON.stringify({ type: "req", id, method, params }))
+  return id
+}
+
 async function sendToGateway(message: string): Promise<string> {
   if (!GATEWAY_URL) throw new Error("OPENCLAW_GATEWAY_URL not configured")
 
   const wsUrl = GATEWAY_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
 
-  // Use native WebSocket (available in Node 20+)
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      ws.close()
-      reject(new Error("Gateway timeout (55s)"))
-    }, 55000)
+    const timeout = setTimeout(() => { ws.close(); reject(new Error("Gateway timeout (55s)")) }, 55000)
 
     const ws = new WebSocket(wsUrl)
-    let responseText = ""
     let connected = false
-    let chatAcked = false
-
-    function send(method: string, params: Record<string, unknown>) {
-      const id = genId()
-      ws.send(JSON.stringify({ type: "req", id, method, params }))
-      return id
-    }
+    let runId: string | null = null
+    let historyReqId: string | null = null
 
     ws.addEventListener("open", () => {
-      // Wait for connect.challenge event
+      // Wait for challenge
     })
 
     ws.addEventListener("message", (event) => {
@@ -78,7 +74,7 @@ async function sendToGateway(message: string): Promise<string> {
 
         // Challenge → connect
         if (msg.type === "event" && msg.event === "connect.challenge") {
-          send("connect", {
+          sendWs(ws, "connect", {
             minProtocol: 3,
             maxProtocol: 3,
             client: {
@@ -97,10 +93,10 @@ async function sendToGateway(message: string): Promise<string> {
           return
         }
 
-        // Connect response
+        // Connect success → send chat
         if (msg.type === "res" && msg.ok === true && !connected) {
           connected = true
-          send("chat.send", {
+          sendWs(ws, "chat.send", {
             sessionKey: "agent:main:main",
             message: message,
             idempotencyKey: genId()
@@ -116,59 +112,57 @@ async function sendToGateway(message: string): Promise<string> {
           return
         }
 
-        // Chat.send ack
-        if (msg.type === "res" && msg.ok === true && connected && !chatAcked) {
-          chatAcked = true
+        // chat.send ack — get the runId
+        if (msg.type === "res" && msg.ok === true && connected && !runId) {
+          runId = msg.payload?.runId || null
           return
         }
 
-        // Chat.send error
+        // Chat event with state=final → run complete, fetch history
+        if (msg.type === "event" && msg.event === "chat" && msg.payload?.state === "final") {
+          // Small delay to ensure the response is written to history
+          setTimeout(() => {
+            historyReqId = sendWs(ws, "chat.history", {
+              sessionKey: "agent:main:main",
+              limit: 5
+            })
+          }, 500)
+          return
+        }
+
+        // History response → extract last assistant message
+        if (msg.type === "res" && msg.id === historyReqId && msg.ok === true) {
+          const messages = msg.payload?.messages || msg.payload || []
+          // Find the last assistant message
+          let lastAssistant = ""
+          const msgArray = Array.isArray(messages) ? messages : []
+          for (let i = msgArray.length - 1; i >= 0; i--) {
+            const m = msgArray[i]
+            if (m.role === "assistant") {
+              // Extract text content
+              if (typeof m.content === "string") {
+                lastAssistant = m.content
+              } else if (Array.isArray(m.content)) {
+                lastAssistant = m.content
+                  .filter((b: { type: string; text?: string }) => b.type === "text")
+                  .map((b: { text: string }) => b.text)
+                  .join("")
+              }
+              break
+            }
+          }
+          clearTimeout(timeout)
+          ws.close()
+          resolve(lastAssistant || "No response received.")
+          return
+        }
+
+        // Error on any request
         if (msg.type === "res" && msg.ok === false && connected) {
           clearTimeout(timeout)
           ws.close()
-          reject(new Error(msg.error?.message || "chat.send failed"))
+          reject(new Error(msg.error?.message || "Gateway request failed"))
           return
-        }
-
-        // Streaming chat events
-        if (msg.type === "event" && msg.event === "chat") {
-          const p = msg.payload || {}
-
-          // Accumulate deltas
-          if (p.stream === "assistant" && p.data?.delta) {
-            responseText += p.data.delta
-          } else if (p.stream === "assistant" && p.data?.text) {
-            responseText += p.data.text
-          } else if (typeof p.delta === "string") {
-            responseText += p.delta
-          }
-
-          // Done
-          if (p.kind === "done" || p.kind === "end" || p.done === true) {
-            if (!responseText && p.content) responseText = p.content
-            clearTimeout(timeout)
-            ws.close()
-            resolve(responseText || "No response received.")
-            return
-          }
-        }
-
-        // Agent events with text
-        if (msg.type === "event" && msg.event === "agent") {
-          const p = msg.payload || {}
-          if (p.stream === "assistant" && p.data?.delta) {
-            responseText += p.data.delta
-          }
-          if (p.stream === "assistant" && p.data?.text && !p.data?.delta) {
-            // full text update, replace
-            responseText = p.data.text
-          }
-          if (p.kind === "done" || p.done === true) {
-            clearTimeout(timeout)
-            ws.close()
-            resolve(responseText || "No response received.")
-            return
-          }
         }
 
       } catch {
@@ -178,9 +172,7 @@ async function sendToGateway(message: string): Promise<string> {
 
     ws.addEventListener("close", () => {
       clearTimeout(timeout)
-      if (responseText) resolve(responseText)
-      else if (!connected) reject(new Error("Connection closed before authentication"))
-      else reject(new Error("Connection closed without response"))
+      reject(new Error("Connection closed unexpectedly"))
     })
 
     ws.addEventListener("error", () => {
