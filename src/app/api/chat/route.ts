@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createServerClient } from "@/lib/supabase/server"
-import WebSocket from "ws"
 
 const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || ""
 const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || ""
+
+export const maxDuration = 60
 
 export async function POST(req: NextRequest) {
   const { content } = await req.json()
   const supabase = createServerClient()
 
-  // Store user message
   const { data: userMessage, error: userError } = await supabase
     .from("chat_messages")
     .insert({ role: "user", content })
@@ -20,7 +20,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: userError.message }, { status: 500 })
   }
 
-  // Send to OpenClaw Gateway
   let assistantContent: string
   try {
     assistantContent = await sendToGateway(content)
@@ -51,17 +50,17 @@ async function sendToGateway(message: string): Promise<string> {
 
   const wsUrl = GATEWAY_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
 
+  // Use native WebSocket (available in Node 20+)
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => { ws.close(); reject(new Error("Gateway timeout (60s)")) }, 60000)
+    const timeout = setTimeout(() => {
+      ws.close()
+      reject(new Error("Gateway timeout (55s)"))
+    }, 55000)
 
-    const ws = new WebSocket(wsUrl, {
-      headers: { "Origin": "https://jacob-command-center-y8us.vercel.app" }
-    })
-
+    const ws = new WebSocket(wsUrl)
     let responseText = ""
     let connected = false
     let chatAcked = false
-    let mainSessionKey = ""
 
     function send(method: string, params: Record<string, unknown>) {
       const id = genId()
@@ -69,13 +68,13 @@ async function sendToGateway(message: string): Promise<string> {
       return id
     }
 
-    ws.on("open", () => {
-      // Wait for connect.challenge
+    ws.addEventListener("open", () => {
+      // Wait for connect.challenge event
     })
 
-    ws.on("message", (data: Buffer | string) => {
+    ws.addEventListener("message", (event) => {
       try {
-        const msg = JSON.parse(data.toString())
+        const msg = JSON.parse(typeof event.data === "string" ? event.data : "")
 
         // Challenge → connect
         if (msg.type === "event" && msg.event === "connect.challenge") {
@@ -98,16 +97,11 @@ async function sendToGateway(message: string): Promise<string> {
           return
         }
 
-        // Connect response → send chat
+        // Connect response
         if (msg.type === "res" && msg.ok === true && !connected) {
           connected = true
-          // Extract mainSessionKey from hello payload
-          mainSessionKey = msg.payload?.session?.mainKey
-            ? `agent:main:${msg.payload.session.mainKey}`
-            : msg.payload?.session?.mainSessionKey || "agent:main:main"
-
           send("chat.send", {
-            sessionKey: mainSessionKey,
+            sessionKey: "agent:main:main",
             message: message,
             idempotencyKey: genId()
           })
@@ -140,15 +134,36 @@ async function sendToGateway(message: string): Promise<string> {
         if (msg.type === "event" && msg.event === "chat") {
           const p = msg.payload || {}
 
-          // Accumulate text
-          if (typeof p.delta === "string") responseText += p.delta
-          if (typeof p.text === "string" && p.kind === "delta") responseText += p.text
-          if (typeof p.content === "string" && p.kind === "delta") responseText += p.content
+          // Accumulate deltas
+          if (p.stream === "assistant" && p.data?.delta) {
+            responseText += p.data.delta
+          } else if (p.stream === "assistant" && p.data?.text) {
+            responseText += p.data.text
+          } else if (typeof p.delta === "string") {
+            responseText += p.delta
+          }
 
-          // Completion
-          if (p.kind === "done" || p.kind === "end" || p.kind === "complete" || p.done === true) {
+          // Done
+          if (p.kind === "done" || p.kind === "end" || p.done === true) {
             if (!responseText && p.content) responseText = p.content
-            if (!responseText && p.text) responseText = p.text
+            clearTimeout(timeout)
+            ws.close()
+            resolve(responseText || "No response received.")
+            return
+          }
+        }
+
+        // Agent events with text
+        if (msg.type === "event" && msg.event === "agent") {
+          const p = msg.payload || {}
+          if (p.stream === "assistant" && p.data?.delta) {
+            responseText += p.data.delta
+          }
+          if (p.stream === "assistant" && p.data?.text && !p.data?.delta) {
+            // full text update, replace
+            responseText = p.data.text
+          }
+          if (p.kind === "done" || p.done === true) {
             clearTimeout(timeout)
             ws.close()
             resolve(responseText || "No response received.")
@@ -157,20 +172,20 @@ async function sendToGateway(message: string): Promise<string> {
         }
 
       } catch {
-        // ignore parse errors
+        // ignore
       }
     })
 
-    ws.on("close", () => {
+    ws.addEventListener("close", () => {
       clearTimeout(timeout)
       if (responseText) resolve(responseText)
       else if (!connected) reject(new Error("Connection closed before authentication"))
       else reject(new Error("Connection closed without response"))
     })
 
-    ws.on("error", (err: Error) => {
+    ws.addEventListener("error", () => {
       clearTimeout(timeout)
-      reject(new Error(`WebSocket error: ${err.message}`))
+      reject(new Error("WebSocket connection error"))
     })
   })
 }
