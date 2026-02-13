@@ -3,6 +3,8 @@ import "./globals.css"
 import { Providers } from "@/components/providers"
 import { Sidebar } from "@/components/sidebar"
 
+export const dynamic = "force-dynamic"
+
 export const metadata: Metadata = {
   title: "Jacob Command Center",
   description: "AI Assistant Dashboard",
