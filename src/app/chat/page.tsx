@@ -205,7 +205,7 @@ export default function ChatPage() {
         </div>
         <p className="text-center text-xs text-muted-foreground mt-2">
           {/* TODO: Connect to OpenClaw Gateway WebSocket for real-time AI responses */}
-          Jacob uses stored responses. Live AI integration coming soon.
+          Connected to OpenClaw Gateway
         </p>
       </div>
     </div>
