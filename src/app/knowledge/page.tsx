@@ -101,13 +101,59 @@ export default function KnowledgePage() {
     if (!files || files.length === 0) return
     setUploading(true)
     for (const file of Array.from(files)) {
+      // Skip hidden files and non-text binary files
+      if (file.name.startsWith(".")) continue
       const formData = new FormData()
       formData.append("file", file)
+      // Preserve relative path for folder uploads
+      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath
+      if (relativePath) formData.append("relative_path", relativePath)
       if (selectedCollection) formData.append("collection_id", selectedCollection)
       await fetch("/api/knowledge/upload", { method: "POST", body: formData })
     }
     setUploading(false)
     loadData()
+  }
+
+  async function handleFolderDrop(items: DataTransferItemList) {
+    const fileEntries: { file: File; path: string }[] = []
+
+    async function traverseEntry(entry: FileSystemEntry, path: string = "") {
+      if (entry.isFile) {
+        const fileEntry = entry as FileSystemFileEntry
+        const file: File = await new Promise((resolve) => fileEntry.file((f) => resolve(f)))
+        if (!file.name.startsWith(".")) {
+          const fullPath = path ? `${path}/${file.name}` : file.name
+          fileEntries.push({ file, path: fullPath })
+        }
+      } else if (entry.isDirectory) {
+        const dirEntry = entry as FileSystemDirectoryEntry
+        const reader = dirEntry.createReader()
+        const entries: FileSystemEntry[] = await new Promise((resolve) => reader.readEntries((e) => resolve(e)))
+        const dirPath = path ? `${path}/${entry.name}` : entry.name
+        for (const child of entries) {
+          await traverseEntry(child, dirPath)
+        }
+      }
+    }
+
+    for (let i = 0; i < items.length; i++) {
+      const entry = items[i].webkitGetAsEntry?.()
+      if (entry) await traverseEntry(entry)
+    }
+
+    if (fileEntries.length > 0) {
+      setUploading(true)
+      for (const { file, path } of fileEntries) {
+        const formData = new FormData()
+        formData.append("file", file)
+        formData.append("relative_path", path)
+        if (selectedCollection) formData.append("collection_id", selectedCollection)
+        await fetch("/api/knowledge/upload", { method: "POST", body: formData })
+      }
+      setUploading(false)
+      loadData()
+    }
   }
 
   async function handleSearch() {
@@ -133,7 +179,20 @@ export default function KnowledgePage() {
   function handleDrop(e: React.DragEvent) {
     e.preventDefault()
     setDragOver(false)
-    handleFileUpload(e.dataTransfer.files)
+    // Check if any dropped items are directories
+    const items = e.dataTransfer.items
+    let hasDirectory = false
+    if (items) {
+      for (let i = 0; i < items.length; i++) {
+        const entry = items[i].webkitGetAsEntry?.()
+        if (entry?.isDirectory) { hasDirectory = true; break }
+      }
+    }
+    if (hasDirectory) {
+      handleFolderDrop(items)
+    } else {
+      handleFileUpload(e.dataTransfer.files)
+    }
   }
 
   function formatFileSize(bytes: number): string {
@@ -287,23 +346,39 @@ export default function KnowledgePage() {
                 <div className="flex flex-col items-center gap-3">
                   <Upload className="h-10 w-10 text-muted-foreground" />
                   <div>
-                    <p className="text-sm text-white font-medium">Drop files here or click to upload</p>
+                    <p className="text-sm text-white font-medium">Drop files or folders here</p>
                     <p className="text-xs text-muted-foreground mt-1">
-                      Supports PDF, TXT, MD, DOCX, CSV, JSON
+                      Supports MD, TXT, PDF, JSON, YAML, Python, JS/TS, Swift, SQL, and more
                     </p>
                   </div>
-                  <label>
-                    <input
-                      type="file"
-                      multiple
-                      accept=".pdf,.txt,.md,.docx,.csv,.json,.py,.js,.ts,.tsx,.jsx,.sh,.bash,.yaml,.yml,.xml,.html,.css,.swift,.sql,.env,.toml,.ini,.cfg,.conf,.log,.rtf"
-                      className="hidden"
-                      onChange={(e) => handleFileUpload(e.target.files)}
-                    />
-                    <Button variant="outline" className="cursor-pointer border-white/20 text-white hover:bg-white/10" asChild>
-                      <span>Choose Files</span>
-                    </Button>
-                  </label>
+                  <div className="flex gap-2">
+                    <label>
+                      <input
+                        type="file"
+                        multiple
+                        accept=".pdf,.txt,.md,.docx,.csv,.json,.py,.js,.ts,.tsx,.jsx,.sh,.bash,.yaml,.yml,.xml,.html,.css,.swift,.sql,.env,.toml,.ini,.cfg,.conf,.log,.rtf"
+                        className="hidden"
+                        onChange={(e) => handleFileUpload(e.target.files)}
+                      />
+                      <Button variant="outline" className="cursor-pointer border-white/20 text-white hover:bg-white/10" asChild>
+                        <span>Choose Files</span>
+                      </Button>
+                    </label>
+                    <label>
+                      <input
+                        type="file"
+                        // @ts-expect-error webkitdirectory is not in standard typings
+                        webkitdirectory=""
+                        directory=""
+                        multiple
+                        className="hidden"
+                        onChange={(e) => handleFileUpload(e.target.files)}
+                      />
+                      <Button variant="outline" className="cursor-pointer border-purple-500/30 text-purple-300 hover:bg-purple-500/10" asChild>
+                        <span><FolderOpen className="h-4 w-4 mr-2 inline" />Choose Folder</span>
+                      </Button>
+                    </label>
+                  </div>
                 </div>
               )}
             </div>

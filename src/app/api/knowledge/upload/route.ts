@@ -13,8 +13,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No file provided" }, { status: 400 })
   }
 
-  const fileName = file.name
-  const fileType = file.type || inferMimeType(fileName)
+  const relativePath = formData.get("relative_path") as string | null
+  const fileName = relativePath || file.name
+  const fileType = file.type || inferMimeType(file.name)
   const fileSize = file.size
   const filePath = `uploads/${Date.now()}-${fileName}`
 
