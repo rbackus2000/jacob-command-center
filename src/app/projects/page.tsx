@@ -235,7 +235,7 @@ export default function ProjectsPage() {
                 <label className="text-sm text-white mb-2 block">Description</label>
                 <Textarea
                   placeholder="Brief description of the project"
-                  value={formData.description}
+                  value={formData.description ?? ""}
                   onChange={(e) =>
                     setFormData({ ...formData, description: e.target.value })
                   }
@@ -336,7 +336,7 @@ export default function ProjectsPage() {
                 <label className="text-sm text-white mb-2 block">Repository URL</label>
                 <Input
                   placeholder="https://github.com/..."
-                  value={formData.repo_url}
+                  value={formData.repo_url ?? ""}
                   onChange={(e) =>
                     setFormData({ ...formData, repo_url: e.target.value })
                   }
@@ -347,7 +347,7 @@ export default function ProjectsPage() {
                 <label className="text-sm text-white mb-2 block">Live URL</label>
                 <Input
                   placeholder="https://..."
-                  value={formData.live_url}
+                  value={formData.live_url ?? ""}
                   onChange={(e) =>
                     setFormData({ ...formData, live_url: e.target.value })
                   }
@@ -358,7 +358,7 @@ export default function ProjectsPage() {
                 <label className="text-sm text-white mb-2 block">Notes</label>
                 <Textarea
                   placeholder="Internal notes about the project"
-                  value={formData.notes}
+                  value={formData.notes ?? ""}
                   onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
                   className="bg-white/5 border-white/10 text-white min-h-[100px]"
                 />
