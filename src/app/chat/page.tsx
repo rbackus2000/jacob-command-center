@@ -25,7 +25,8 @@ export default function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const supabase = createClient()
+  const supabaseRef = useRef(createClient())
+  const supabase = supabaseRef.current
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
@@ -40,15 +41,30 @@ export default function ChatPage() {
 
   useEffect(() => {
     async function loadMessages() {
-      const { data } = await supabase
-        .from("chat_messages")
-        .select("*")
-        .order("created_at", { ascending: true })
-        .limit(100)
-      if (data) setMessages(data)
-      setInitialLoading(false)
+      try {
+        const { data, error } = await supabase
+          .from("chat_messages")
+          .select("*")
+          .order("created_at", { ascending: true })
+          .limit(100)
+        if (error) {
+          console.error("Failed to load chat messages:", error)
+        }
+        if (data && data.length > 0) {
+          setMessages(data)
+        }
+      } catch (err) {
+        console.error("Chat load error:", err)
+      } finally {
+        setInitialLoading(false)
+      }
     }
     loadMessages()
+
+    // Reload messages when tab gets focus or user navigates back
+    const handleFocus = () => loadMessages()
+    window.addEventListener("focus", handleFocus)
+    return () => window.removeEventListener("focus", handleFocus)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
