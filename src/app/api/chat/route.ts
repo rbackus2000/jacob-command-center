@@ -82,10 +82,10 @@ async function sendToGateway(message: string): Promise<string> {
             minProtocol: 3,
             maxProtocol: 3,
             client: {
-              id: "openclaw-control-ui",
+              id: "gateway-client",
               version: "1.0.0",
               platform: "linux",
-              mode: "webchat",
+              mode: "backend",
               instanceId: "jcc-" + Date.now()
             },
             role: "operator",
