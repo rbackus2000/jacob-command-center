@@ -296,7 +296,7 @@ export default function KnowledgePage() {
                     <input
                       type="file"
                       multiple
-                      accept=".pdf,.txt,.md,.docx,.csv,.json"
+                      accept=".pdf,.txt,.md,.docx,.csv,.json,.py,.js,.ts,.tsx,.jsx,.sh,.bash,.yaml,.yml,.xml,.html,.css,.swift,.sql,.env,.toml,.ini,.cfg,.conf,.log,.rtf"
                       className="hidden"
                       onChange={(e) => handleFileUpload(e.target.files)}
                     />
