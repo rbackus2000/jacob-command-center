@@ -114,7 +114,7 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex flex-col h-screen">
+    <div className="flex flex-col h-full">
       {/* Header */}
       <div className="border-b border-white/10 bg-black/20 backdrop-blur-xl p-4">
         <div className="flex items-center gap-3">
@@ -168,7 +168,7 @@ export default function ChatPage() {
                   </div>
                 )}
                 <div
-                  className={`max-w-[70%] rounded-2xl px-4 py-3 text-sm ${
+                  className={`max-w-[85%] sm:max-w-[70%] rounded-2xl px-4 py-3 text-sm break-words overflow-hidden ${
                     msg.role === "user"
                       ? "bg-blue-500 text-white rounded-br-md"
                       : "glass text-white rounded-bl-md"

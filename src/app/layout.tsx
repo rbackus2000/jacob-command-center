@@ -15,9 +15,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" suppressHydrationWarning>
       <body className="gradient-bg min-h-screen antialiased">
         <Providers>
-          <div className="flex min-h-screen">
+          <div className="flex h-screen overflow-hidden">
             <Sidebar />
-            <main className="flex-1 ml-16 lg:ml-64">
+            <main className="flex-1 ml-16 lg:ml-64 overflow-hidden">
               {children}
             </main>
           </div>
