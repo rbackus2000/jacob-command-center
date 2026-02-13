@@ -6,10 +6,12 @@ const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || ""
 
 export const maxDuration = 60
 
+// POST: Send message and poll for response (resilient to slow responses)
 export async function POST(req: NextRequest) {
   const { content } = await req.json()
   const supabase = createServerClient()
 
+  // Save user message immediately
   const { data: userMessage, error: userError } = await supabase
     .from("chat_messages")
     .insert({ role: "user", content })
@@ -20,12 +22,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: userError.message }, { status: 500 })
   }
 
+  // Send to gateway and wait for response with retries
   let assistantContent: string
   try {
     assistantContent = await sendToGateway(content)
   } catch (error) {
     console.error("Gateway error:", error)
-    assistantContent = `⚠️ Could not reach the OpenClaw Gateway. Error: ${error instanceof Error ? error.message : "Unknown error"}`
+    // If timeout, try fetching latest response from history
+    if (error instanceof Error && error.message.includes("timeout")) {
+      try {
+        assistantContent = await pollGatewayHistory(3)
+      } catch {
+        assistantContent = `⚠️ Response is taking longer than expected. Check Telegram for Jacob's reply, or try again.`
+      }
+    } else {
+      assistantContent = `⚠️ Could not reach the OpenClaw Gateway. Error: ${error instanceof Error ? error.message : "Unknown error"}`
+    }
   }
 
   const { data: assistantMessage, error: assistantError } = await supabase
@@ -51,22 +63,81 @@ function sendWs(ws: WebSocket, method: string, params: Record<string, unknown>):
   return id
 }
 
+// Poll gateway history to get latest assistant response
+async function pollGatewayHistory(retries: number): Promise<string> {
+  for (let i = 0; i < retries; i++) {
+    await new Promise(r => setTimeout(r, 3000))
+    try {
+      const msg = await fetchLastAssistantMessage()
+      if (msg) return msg
+    } catch { /* retry */ }
+  }
+  throw new Error("Could not fetch response from history")
+}
+
+// Quick WS connect → fetch history → close
+async function fetchLastAssistantMessage(): Promise<string | null> {
+  const wsUrl = GATEWAY_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { ws.close(); reject(new Error("History fetch timeout")) }, 10000)
+    const ws = new WebSocket(wsUrl)
+    let connected = false
+    let historyReqId: string | null = null
+
+    ws.addEventListener("message", (event) => {
+      try {
+        const msg = JSON.parse(typeof event.data === "string" ? event.data : "")
+
+        if (msg.type === "event" && msg.event === "connect.challenge") {
+          sendWs(ws, "connect", {
+            minProtocol: 3, maxProtocol: 3,
+            client: { id: "gateway-client", version: "1.0.0", platform: "linux", mode: "backend", instanceId: "jcc-hist-" + Date.now() },
+            role: "operator", scopes: ["operator.admin"], caps: [],
+            auth: { token: GATEWAY_TOKEN }, userAgent: "jacob-command-center/1.0"
+          })
+          return
+        }
+
+        if (msg.type === "res" && msg.ok === true && !connected) {
+          connected = true
+          historyReqId = sendWs(ws, "chat.history", { sessionKey: "agent:main:main", limit: 3 })
+          return
+        }
+
+        if (msg.type === "res" && msg.id === historyReqId && msg.ok === true) {
+          const messages = Array.isArray(msg.payload?.messages) ? msg.payload.messages : Array.isArray(msg.payload) ? msg.payload : []
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const m = messages[i]
+            if (m.role === "assistant") {
+              let text = ""
+              if (typeof m.content === "string") text = m.content
+              else if (Array.isArray(m.content)) text = m.content.filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text).join("")
+              clearTimeout(timeout); ws.close(); resolve(text || null); return
+            }
+          }
+          clearTimeout(timeout); ws.close(); resolve(null); return
+        }
+      } catch { /* ignore */ }
+    })
+
+    ws.addEventListener("error", () => { clearTimeout(timeout); reject(new Error("WS error")) })
+    ws.addEventListener("close", () => { clearTimeout(timeout); reject(new Error("WS closed")) })
+  })
+}
+
 async function sendToGateway(message: string): Promise<string> {
   if (!GATEWAY_URL) throw new Error("OPENCLAW_GATEWAY_URL not configured")
 
   const wsUrl = GATEWAY_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
 
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => { ws.close(); reject(new Error("Gateway timeout (55s)")) }, 55000)
+    const timeout = setTimeout(() => { ws.close(); reject(new Error("Gateway timeout (45s)")) }, 45000)
 
     const ws = new WebSocket(wsUrl)
     let connected = false
     let runId: string | null = null
     let historyReqId: string | null = null
-
-    ws.addEventListener("open", () => {
-      // Wait for challenge
-    })
 
     ws.addEventListener("message", (event) => {
       try {
@@ -75,20 +146,10 @@ async function sendToGateway(message: string): Promise<string> {
         // Challenge → connect
         if (msg.type === "event" && msg.event === "connect.challenge") {
           sendWs(ws, "connect", {
-            minProtocol: 3,
-            maxProtocol: 3,
-            client: {
-              id: "gateway-client",
-              version: "1.0.0",
-              platform: "linux",
-              mode: "backend",
-              instanceId: "jcc-" + Date.now()
-            },
-            role: "operator",
-            scopes: ["operator.admin"],
-            caps: [],
-            auth: { token: GATEWAY_TOKEN },
-            userAgent: "jacob-command-center/1.0"
+            minProtocol: 3, maxProtocol: 3,
+            client: { id: "gateway-client", version: "1.0.0", platform: "linux", mode: "backend", instanceId: "jcc-" + Date.now() },
+            role: "operator", scopes: ["operator.admin"], caps: [],
+            auth: { token: GATEWAY_TOKEN }, userAgent: "jacob-command-center/1.0"
           })
           return
         }
@@ -106,79 +167,53 @@ async function sendToGateway(message: string): Promise<string> {
 
         // Connect error
         if (msg.type === "res" && msg.ok === false && !connected) {
-          clearTimeout(timeout)
-          ws.close()
+          clearTimeout(timeout); ws.close()
           reject(new Error(msg.error?.message || "Gateway connect failed"))
           return
         }
 
-        // chat.send ack — get the runId
+        // chat.send ack
         if (msg.type === "res" && msg.ok === true && connected && !runId) {
-          runId = msg.payload?.runId || null
+          runId = msg.payload?.runId || "ack"
           return
         }
 
-        // Chat event with state=final → run complete, fetch history
+        // Chat event with state=final → fetch history
         if (msg.type === "event" && msg.event === "chat" && msg.payload?.state === "final") {
-          // Small delay to ensure the response is written to history
           setTimeout(() => {
-            historyReqId = sendWs(ws, "chat.history", {
-              sessionKey: "agent:main:main",
-              limit: 5
-            })
+            historyReqId = sendWs(ws, "chat.history", { sessionKey: "agent:main:main", limit: 5 })
           }, 500)
           return
         }
 
         // History response → extract last assistant message
         if (msg.type === "res" && msg.id === historyReqId && msg.ok === true) {
-          const messages = msg.payload?.messages || msg.payload || []
-          // Find the last assistant message
+          const messages = Array.isArray(msg.payload?.messages) ? msg.payload.messages : Array.isArray(msg.payload) ? msg.payload : []
           let lastAssistant = ""
-          const msgArray = Array.isArray(messages) ? messages : []
-          for (let i = msgArray.length - 1; i >= 0; i--) {
-            const m = msgArray[i]
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const m = messages[i]
             if (m.role === "assistant") {
-              // Extract text content
-              if (typeof m.content === "string") {
-                lastAssistant = m.content
-              } else if (Array.isArray(m.content)) {
-                lastAssistant = m.content
-                  .filter((b: { type: string; text?: string }) => b.type === "text")
-                  .map((b: { text: string }) => b.text)
-                  .join("")
-              }
+              if (typeof m.content === "string") lastAssistant = m.content
+              else if (Array.isArray(m.content)) lastAssistant = m.content.filter((b: { type: string; text?: string }) => b.type === "text").map((b: { text: string }) => b.text).join("")
               break
             }
           }
-          clearTimeout(timeout)
-          ws.close()
+          clearTimeout(timeout); ws.close()
           resolve(lastAssistant || "No response received.")
           return
         }
 
         // Error on any request
         if (msg.type === "res" && msg.ok === false && connected) {
-          clearTimeout(timeout)
-          ws.close()
+          clearTimeout(timeout); ws.close()
           reject(new Error(msg.error?.message || "Gateway request failed"))
           return
         }
-
-      } catch {
-        // ignore
-      }
+      } catch { /* ignore */ }
     })
 
-    ws.addEventListener("close", () => {
-      clearTimeout(timeout)
-      reject(new Error("Connection closed unexpectedly"))
-    })
-
-    ws.addEventListener("error", () => {
-      clearTimeout(timeout)
-      reject(new Error("WebSocket connection error"))
-    })
+    ws.addEventListener("close", () => { clearTimeout(timeout); reject(new Error("Connection closed unexpectedly")) })
+    ws.addEventListener("error", () => { clearTimeout(timeout); reject(new Error("WebSocket connection error")) })
   })
 }
 
