@@ -14,7 +14,24 @@ interface Message {
   created_at: string
 }
 
+interface Agent {
+  id: string
+  name: string
+  emoji: string
+  sessionKey: string
+}
+
+const AGENTS: Agent[] = [
+  { id: "main", name: "Jacob", emoji: "🧠", sessionKey: "agent:main:main" },
+  { id: "elon-musk", name: "Elon", emoji: "🚀", sessionKey: "agent:elon-musk:main" },
+  { id: "ray-dalio", name: "Ray", emoji: "📊", sessionKey: "agent:ray-dalio:main" },
+  { id: "lawrence-yun", name: "Lawrence", emoji: "🏠", sessionKey: "agent:lawrence-yun:main" },
+  { id: "dario-amodei", name: "Dario", emoji: "🧠", sessionKey: "agent:dario-amodei:main" },
+  { id: "anton-osika", name: "Anton", emoji: "⚡", sessionKey: "agent:anton-osika:main" },
+]
+
 export default function ChatPage() {
+  const [selectedAgent, setSelectedAgent] = useState<Agent>(AGENTS[0])
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
@@ -38,7 +55,7 @@ export default function ChatPage() {
 
   const loadMessages = useCallback(async () => {
     try {
-      const res = await fetch("/api/chat")
+      const res = await fetch(`/api/chat?sessionKey=${encodeURIComponent(selectedAgent.sessionKey)}`)
       const data = await res.json()
       if (data.messages && Array.isArray(data.messages)) {
         // Sort by timestamp ascending
@@ -52,7 +69,7 @@ export default function ChatPage() {
     } finally {
       setInitialLoading(false)
     }
-  }, [])
+  }, [selectedAgent.sessionKey])
 
   useEffect(() => {
     loadMessages()
@@ -131,6 +148,12 @@ export default function ChatPage() {
     }
   }
 
+  function handleAgentChange(agent: Agent) {
+    setSelectedAgent(agent)
+    setMessages([])
+    setInitialLoading(true)
+  }
+
   async function sendMessage() {
     const text = input.trim()
     const hasImage = !!pendingImage
@@ -171,7 +194,7 @@ export default function ChatPage() {
       await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, sessionKey: selectedAgent.sessionKey }),
       })
       
       // Refresh messages from Gateway to get the real conversation
@@ -237,13 +260,13 @@ export default function ChatPage() {
 
       {/* Header */}
       <div className="border-b border-white/10 bg-black/20 backdrop-blur-xl p-4">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/20 border border-blue-500/30">
-            <Bot className="h-6 w-6 text-blue-400" />
+        <div className="flex items-center gap-3 mb-4">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/20 border border-blue-500/30 text-2xl">
+            {selectedAgent.emoji}
           </div>
           <div>
             <h1 className="text-lg font-semibold text-white" style={{ fontFamily: "'Playfair Display', serif" }}>
-              Chat with Jacob
+              Chat with {selectedAgent.name}
             </h1>
             <p className="text-xs text-muted-foreground">Your AI assistant is ready</p>
           </div>
@@ -251,6 +274,24 @@ export default function ChatPage() {
             <div className="h-2 w-2 rounded-full bg-green-400 animate-pulse" />
             <span className="text-xs text-green-400">Online</span>
           </div>
+        </div>
+
+        {/* Agent Selector */}
+        <div className="flex gap-2 overflow-x-auto pb-2 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+          {AGENTS.map((agent) => (
+            <button
+              key={agent.id}
+              onClick={() => handleAgentChange(agent)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg whitespace-nowrap transition-all ${
+                selectedAgent.id === agent.id
+                  ? "bg-blue-500 text-white border border-blue-400"
+                  : "glass text-white/70 hover:text-white hover:bg-white/10 border border-white/10"
+              }`}
+            >
+              <span className="text-base">{agent.emoji}</span>
+              <span className="text-sm font-medium">{agent.name}</span>
+            </button>
+          ))}
         </div>
       </div>
 
@@ -262,14 +303,14 @@ export default function ChatPage() {
           </div>
         ) : messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-500/20 border border-blue-500/30 mb-4">
-              <Bot className="h-8 w-8 text-blue-400" />
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-500/20 border border-blue-500/30 mb-4 text-4xl">
+              {selectedAgent.emoji}
             </div>
             <h2 className="text-xl font-semibold text-white mb-2" style={{ fontFamily: "'Playfair Display', serif" }}>
               Start a conversation
             </h2>
             <p className="text-muted-foreground max-w-md">
-              Ask Jacob anything — search your knowledge base, manage tasks, or just chat.
+              Ask {selectedAgent.name} anything — search your knowledge base, manage tasks, or just chat.
             </p>
           </div>
         ) : (
@@ -375,7 +416,7 @@ export default function ChatPage() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={pendingImage ? "Add a message about this image..." : "Message Jacob..."}
+            placeholder={pendingImage ? "Add a message about this image..." : `Message ${selectedAgent.name}...`}
             className="min-h-[44px] max-h-[200px] resize-none bg-white/5 border-white/10 text-white placeholder:text-muted-foreground focus:border-blue-500/50"
             rows={1}
           />

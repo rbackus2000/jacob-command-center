@@ -7,20 +7,26 @@ export const maxDuration = 60
 
 // POST: Send message to Gateway (no Supabase - Gateway is source of truth)
 export async function POST(req: NextRequest) {
-  const { content } = await req.json()
+  const { content, sessionKey: requestedSessionKey } = await req.json()
+
+  // Validate and default sessionKey
+  const sessionKey = requestedSessionKey || "agent:main:main"
+  if (!sessionKey.startsWith("agent:")) {
+    return NextResponse.json({ error: "Invalid sessionKey" }, { status: 400 })
+  }
 
   // Send to gateway and wait for response with retries
   let assistantContent: string
   try {
-    assistantContent = await sendToGateway(content)
+    assistantContent = await sendToGateway(content, sessionKey)
   } catch (error) {
     console.error("Gateway error:", error)
     // If timeout, try fetching latest response from history
     if (error instanceof Error && error.message.includes("timeout")) {
       try {
-        assistantContent = await pollGatewayHistory(3)
+        assistantContent = await pollGatewayHistory(3, sessionKey)
       } catch {
-        assistantContent = `⚠️ Response is taking longer than expected. Check Telegram for Jacob's reply, or try again.`
+        assistantContent = `⚠️ Response is taking longer than expected. Check Telegram for the agent's reply, or try again.`
       }
     } else {
       assistantContent = `⚠️ Could not reach the OpenClaw Gateway. Error: ${error instanceof Error ? error.message : "Unknown error"}`
@@ -44,11 +50,11 @@ function sendWs(ws: WebSocket, method: string, params: Record<string, unknown>):
 }
 
 // Poll gateway history to get latest assistant response
-async function pollGatewayHistory(retries: number): Promise<string> {
+async function pollGatewayHistory(retries: number, sessionKey: string): Promise<string> {
   for (let i = 0; i < retries; i++) {
     await new Promise(r => setTimeout(r, 3000))
     try {
-      const msg = await fetchLastAssistantMessage()
+      const msg = await fetchLastAssistantMessage(sessionKey)
       if (msg) return msg
     } catch { /* retry */ }
   }
@@ -56,7 +62,7 @@ async function pollGatewayHistory(retries: number): Promise<string> {
 }
 
 // Quick WS connect → fetch history → close
-async function fetchLastAssistantMessage(): Promise<string | null> {
+async function fetchLastAssistantMessage(sessionKey: string): Promise<string | null> {
   const wsUrl = GATEWAY_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
 
   return new Promise((resolve, reject) => {
@@ -81,7 +87,7 @@ async function fetchLastAssistantMessage(): Promise<string | null> {
 
         if (msg.type === "res" && msg.ok === true && !connected) {
           connected = true
-          historyReqId = sendWs(ws, "chat.history", { sessionKey: "agent:main:main", limit: 3 })
+          historyReqId = sendWs(ws, "chat.history", { sessionKey, limit: 3 })
           return
         }
 
@@ -106,7 +112,7 @@ async function fetchLastAssistantMessage(): Promise<string | null> {
   })
 }
 
-async function sendToGateway(message: string): Promise<string> {
+async function sendToGateway(message: string, sessionKey: string): Promise<string> {
   if (!GATEWAY_URL) throw new Error("OPENCLAW_GATEWAY_URL not configured")
 
   const wsUrl = GATEWAY_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
@@ -138,7 +144,7 @@ async function sendToGateway(message: string): Promise<string> {
         if (msg.type === "res" && msg.ok === true && !connected) {
           connected = true
           sendWs(ws, "chat.send", {
-            sessionKey: "agent:main:main",
+            sessionKey,
             message: message,
             idempotencyKey: genId()
           })
@@ -161,7 +167,7 @@ async function sendToGateway(message: string): Promise<string> {
         // Chat event with state=final → fetch history
         if (msg.type === "event" && msg.event === "chat" && msg.payload?.state === "final") {
           setTimeout(() => {
-            historyReqId = sendWs(ws, "chat.history", { sessionKey: "agent:main:main", limit: 5 })
+            historyReqId = sendWs(ws, "chat.history", { sessionKey, limit: 5 })
           }, 500)
           return
         }
@@ -198,9 +204,17 @@ async function sendToGateway(message: string): Promise<string> {
 }
 
 // GET: Fetch chat history from Gateway
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const messages = await fetchGatewayHistory(100)
+    const { searchParams } = new URL(req.url)
+    const sessionKey = searchParams.get("sessionKey") || "agent:main:main"
+    
+    // Validate sessionKey
+    if (!sessionKey.startsWith("agent:")) {
+      return NextResponse.json({ error: "Invalid sessionKey" }, { status: 400 })
+    }
+
+    const messages = await fetchGatewayHistory(100, sessionKey)
     // Normalize to expected format: { id, role, content, created_at }
     const normalized = messages.map((m, idx) => ({
       id: m.id || `msg-${m.timestamp || idx}`,
@@ -223,7 +237,7 @@ interface GatewayMessage {
 }
 
 // Fetch chat history from Gateway via WebSocket
-async function fetchGatewayHistory(limit: number): Promise<GatewayMessage[]> {
+async function fetchGatewayHistory(limit: number, sessionKey: string): Promise<GatewayMessage[]> {
   const wsUrl = GATEWAY_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
 
   return new Promise((resolve, reject) => {
@@ -248,7 +262,7 @@ async function fetchGatewayHistory(limit: number): Promise<GatewayMessage[]> {
 
         if (msg.type === "res" && msg.ok === true && !connected) {
           connected = true
-          historyReqId = sendWs(ws, "chat.history", { sessionKey: "agent:main:main", limit })
+          historyReqId = sendWs(ws, "chat.history", { sessionKey, limit })
           return
         }
 
