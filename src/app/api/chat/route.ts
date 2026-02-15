@@ -1,26 +1,13 @@
 import { NextRequest, NextResponse } from "next/server"
-import { createServerClient } from "@/lib/supabase/server"
 
 const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || ""
 const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || ""
 
 export const maxDuration = 60
 
-// POST: Send message and poll for response (resilient to slow responses)
+// POST: Send message to Gateway (no Supabase - Gateway is source of truth)
 export async function POST(req: NextRequest) {
   const { content } = await req.json()
-  const supabase = createServerClient()
-
-  // Save user message immediately
-  const { data: userMessage, error: userError } = await supabase
-    .from("chat_messages")
-    .insert({ role: "user", content })
-    .select()
-    .single()
-
-  if (userError) {
-    return NextResponse.json({ error: userError.message }, { status: 500 })
-  }
 
   // Send to gateway and wait for response with retries
   let assistantContent: string
@@ -40,17 +27,10 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const { data: assistantMessage, error: assistantError } = await supabase
-    .from("chat_messages")
-    .insert({ role: "assistant", content: assistantContent })
-    .select()
-    .single()
-
-  if (assistantError) {
-    return NextResponse.json({ error: assistantError.message }, { status: 500 })
-  }
-
-  return NextResponse.json({ userMessage, assistantMessage })
+  return NextResponse.json({ 
+    success: true,
+    content: assistantContent 
+  })
 }
 
 function genId(): string {
@@ -217,17 +197,105 @@ async function sendToGateway(message: string): Promise<string> {
   })
 }
 
+// GET: Fetch chat history from Gateway
 export async function GET() {
-  const supabase = createServerClient()
-  const { data, error } = await supabase
-    .from("chat_messages")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(200)
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    const messages = await fetchGatewayHistory(100)
+    // Normalize to expected format: { id, role, content, created_at }
+    const normalized = messages.map((m, idx) => ({
+      id: m.id || `msg-${m.timestamp || idx}`,
+      role: m.role,
+      content: extractTextContent(m.content),
+      created_at: normalizeTimestamp(m.timestamp)
+    }))
+    return NextResponse.json({ messages: normalized })
+  } catch (error) {
+    console.error("Failed to fetch Gateway history:", error)
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Failed to fetch messages" }, { status: 500 })
   }
+}
 
-  return NextResponse.json({ messages: data })
+interface GatewayMessage {
+  id?: string
+  role: "user" | "assistant" | "system"
+  content: string | Array<{ type: string; text?: string }>
+  timestamp?: number | string
+}
+
+// Fetch chat history from Gateway via WebSocket
+async function fetchGatewayHistory(limit: number): Promise<GatewayMessage[]> {
+  const wsUrl = GATEWAY_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { ws.close(); reject(new Error("History fetch timeout")) }, 15000)
+    const ws = new WebSocket(wsUrl)
+    let connected = false
+    let historyReqId: string | null = null
+
+    ws.addEventListener("message", (event) => {
+      try {
+        const msg = JSON.parse(typeof event.data === "string" ? event.data : "")
+
+        if (msg.type === "event" && msg.event === "connect.challenge") {
+          sendWs(ws, "connect", {
+            minProtocol: 3, maxProtocol: 3,
+            client: { id: "gateway-client", version: "1.0.0", platform: "linux", mode: "backend", instanceId: "jcc-hist-" + Date.now() },
+            role: "operator", scopes: ["operator.admin"], caps: [],
+            auth: { token: GATEWAY_TOKEN }, userAgent: "jacob-command-center/1.0"
+          })
+          return
+        }
+
+        if (msg.type === "res" && msg.ok === true && !connected) {
+          connected = true
+          historyReqId = sendWs(ws, "chat.history", { sessionKey: "agent:main:main", limit })
+          return
+        }
+
+        if (msg.type === "res" && msg.id === historyReqId && msg.ok === true) {
+          const messages = Array.isArray(msg.payload?.messages) ? msg.payload.messages : Array.isArray(msg.payload) ? msg.payload : []
+          clearTimeout(timeout)
+          ws.close()
+          resolve(messages)
+          return
+        }
+
+        if (msg.type === "res" && msg.ok === false) {
+          clearTimeout(timeout)
+          ws.close()
+          reject(new Error(msg.error?.message || "Gateway request failed"))
+          return
+        }
+      } catch (err) {
+        console.error("WS message parse error:", err)
+      }
+    })
+
+    ws.addEventListener("error", () => { clearTimeout(timeout); reject(new Error("WS error")) })
+    ws.addEventListener("close", () => { clearTimeout(timeout); reject(new Error("WS closed")) })
+  })
+}
+
+// Extract text content from Gateway message content
+function extractTextContent(content: string | Array<{ type: string; text?: string }>): string {
+  if (typeof content === "string") return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text || "")
+      .join("")
+  }
+  return ""
+}
+
+// Normalize timestamp to ISO string
+function normalizeTimestamp(timestamp: number | string | undefined): string {
+  if (!timestamp) return new Date().toISOString()
+  if (typeof timestamp === "string") return timestamp
+  if (typeof timestamp === "number") {
+    // Handle both ms and seconds
+    const ts = timestamp > 10000000000 ? timestamp : timestamp * 1000
+    return new Date(ts).toISOString()
+  }
+  return new Date().toISOString()
 }

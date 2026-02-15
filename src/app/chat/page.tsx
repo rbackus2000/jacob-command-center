@@ -5,7 +5,6 @@ import { motion, AnimatePresence } from "framer-motion"
 import { Send, Bot, User, Loader2, ImagePlus, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import { createClient } from "@/lib/supabase/client"
 import Image from "next/image"
 
 interface Message {
@@ -25,8 +24,6 @@ export default function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const supabaseRef = useRef(createClient())
-  const supabase = supabaseRef.current
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
@@ -39,34 +36,39 @@ export default function ChatPage() {
     })
   }, [])
 
-  useEffect(() => {
-    async function loadMessages() {
-      try {
-        const { data, error } = await supabase
-          .from("chat_messages")
-          .select("*")
-          .order("created_at", { ascending: false })
-          .limit(200)
-        if (error) {
-          console.error("Failed to load chat messages:", error)
-        }
-        if (data && data.length > 0) {
-          setMessages(data.reverse())
-        }
-      } catch (err) {
-        console.error("Chat load error:", err)
-      } finally {
-        setInitialLoading(false)
+  const loadMessages = useCallback(async () => {
+    try {
+      const res = await fetch("/api/chat")
+      const data = await res.json()
+      if (data.messages && Array.isArray(data.messages)) {
+        // Sort by timestamp ascending
+        const sorted = data.messages.sort((a: Message, b: Message) => 
+          new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+        )
+        setMessages(sorted)
       }
+    } catch (err) {
+      console.error("Chat load error:", err)
+    } finally {
+      setInitialLoading(false)
     }
+  }, [])
+
+  useEffect(() => {
     loadMessages()
 
-    // Reload messages when tab gets focus or user navigates back
+    // Auto-refresh every 12 seconds to show new Telegram messages
+    const refreshInterval = setInterval(loadMessages, 12000)
+
+    // Reload messages when tab gets focus
     const handleFocus = () => loadMessages()
     window.addEventListener("focus", handleFocus)
-    return () => window.removeEventListener("focus", handleFocus)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    
+    return () => {
+      clearInterval(refreshInterval)
+      window.removeEventListener("focus", handleFocus)
+    }
+  }, [loadMessages])
 
   useEffect(() => {
     scrollToBottom()
@@ -166,19 +168,14 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, tempUserMsg])
 
     try {
-      const res = await fetch("/api/chat", {
+      await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content }),
       })
-      const data = await res.json()
-      if (data.userMessage && data.assistantMessage) {
-        setMessages((prev) => [
-          ...prev.filter((m) => m.id !== tempUserMsg.id),
-          data.userMessage,
-          data.assistantMessage,
-        ])
-      }
+      
+      // Refresh messages from Gateway to get the real conversation
+      await loadMessages()
     } catch (error) {
       console.error("Failed to send message:", error)
       setMessages((prev) => prev.filter((m) => m.id !== tempUserMsg.id))
