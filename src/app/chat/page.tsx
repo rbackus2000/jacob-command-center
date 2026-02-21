@@ -91,67 +91,73 @@ export default function ChatPage() {
     })
   }, [])
 
+  // --- Extract text content from a Gateway message object ---
+  function extractContent(msg: unknown): string {
+    if (!msg || typeof msg !== "object") return ""
+    const m = msg as Record<string, unknown>
+    const content = m.content
+    if (typeof content === "string") return content
+    if (Array.isArray(content)) {
+      return content
+        .filter((block: unknown) => {
+          const b = block as Record<string, unknown>
+          return b.type === "text" && typeof b.text === "string"
+        })
+        .map((block: unknown) => (block as Record<string, string>).text)
+        .join("\n")
+    }
+    return ""
+  }
+
   // --- Handle incoming WS events ---
   const handleChatEvent = useCallback((payload: Record<string, unknown>) => {
     const agent = selectedAgentRef.current
     if (payload.sessionKey && payload.sessionKey !== agent.sessionKey) return
 
-    console.log("[WS] Chat/Agent event:", payload.type, payload)
+    const state = payload.state as string
+    console.log("[WS] Chat event, state:", state, payload)
 
-    const type = payload.type as string
-
-    if (type === "partial" || type === "delta") {
-      const delta = (payload.delta || payload.content || "") as string
-      setStreamingContent((prev) => prev + delta)
-    } else if (type === "final" || type === "message") {
-      const content = (payload.content || payload.text || "") as string
-      if (content && payload.role === "assistant") {
-        setStreamingContent("")
+    if (state === "delta") {
+      // Streaming update — extract content from message
+      const text = extractContent(payload.message)
+      if (text) {
+        setStreamingContent(text) // Gateway sends cumulative content, not deltas
+      }
+    } else if (state === "final") {
+      // Final response
+      const text = extractContent(payload.message) || ""
+      setStreamingContent("")
+      if (text) {
         setMessages((prev) => [
           ...prev,
           {
-            id: (payload.id as string) || `ws-${Date.now()}`,
+            id: (payload.runId as string) || `ws-${Date.now()}`,
             role: "assistant",
-            content,
+            content: text,
             created_at: new Date().toISOString(),
           },
         ])
-        setLoading(false)
-        currentRunId.current = null
       }
-    } else if (type === "done" || type === "end") {
-      setStreamingContent((prev) => {
-        if (prev && currentRunId.current) {
-          setMessages((msgs) => [
-            ...msgs,
-            {
-              id: `ws-${Date.now()}`,
-              role: "assistant",
-              content: prev,
-              created_at: new Date().toISOString(),
-            },
-          ])
-        }
-        return ""
-      })
       setLoading(false)
       currentRunId.current = null
-    } else if (type === "reply") {
-      const content = (payload.content || "") as string
-      if (content) {
-        setStreamingContent("")
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: (payload.id as string) || `ws-${Date.now()}`,
-            role: "assistant",
-            content,
-            created_at: new Date().toISOString(),
-          },
-        ])
-        setLoading(false)
-        currentRunId.current = null
-      }
+    } else if (state === "error") {
+      setStreamingContent("")
+      const errMsg = (payload.errorMessage as string) || "An error occurred"
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `err-${Date.now()}`,
+          role: "assistant",
+          content: `⚠️ ${errMsg}`,
+          created_at: new Date().toISOString(),
+        },
+      ])
+      setLoading(false)
+      currentRunId.current = null
+    } else if (state === "aborted") {
+      setStreamingContent("")
+      setLoading(false)
+      currentRunId.current = null
     }
   }, [])
 
@@ -422,19 +428,18 @@ export default function ChatPage() {
 
   function renderContent(text: string) {
     if (!text || typeof text !== "string") return ""
-    const parts = text.split(/(\[Screenshot uploaded: [^\]]+\])/)
-    return parts.map((part) => {
-      const match = part.match(/\[Screenshot uploaded: ([^\]]+)\]/)
-      if (match) {
-        return `<div class="my-2"><img src="${match[1]}" alt="Screenshot" class="max-w-full rounded-lg max-h-[300px] object-contain" /></div>`
-      }
-      return part
-        .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="bg-black/40 rounded-lg p-3 my-2 overflow-x-auto text-sm"><code>$2</code></pre>')
-        .replace(/`([^`]+)`/g, '<code class="bg-black/30 px-1.5 py-0.5 rounded text-sm text-blue-300">$1</code>')
-        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-        .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-        .replace(/\n/g, "<br/>")
-    }).join("")
+    // Escape HTML first to prevent XSS
+    const escaped = text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+    // Apply markdown-like formatting
+    return escaped
+      .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="bg-black/40 rounded-lg p-3 my-2 overflow-x-auto text-sm"><code>$2</code></pre>')
+      .replace(/`([^`]+)`/g, '<code class="bg-black/30 px-1.5 py-0.5 rounded text-sm text-blue-300">$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+      .replace(/\n/g, "<br/>")
   }
 
   if (!mounted) {
