@@ -210,9 +210,6 @@ export default function ChatPage() {
                 platform: "web",
                 mode: "webchat",
               },
-              device: {
-                id: "jacob-command-center-web",
-              },
               role: "operator",
               scopes: ["operator.read", "operator.write"],
               caps: [],
