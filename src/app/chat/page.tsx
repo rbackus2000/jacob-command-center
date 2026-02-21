@@ -36,6 +36,7 @@ const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_OPENCLAW_GATEWAY_TOKEN || ""
 let msgCounter = 0
 
 export default function ChatPage() {
+  const [mounted, setMounted] = useState(false)
   const [selectedAgent, setSelectedAgent] = useState<Agent>(AGENTS[0])
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
@@ -53,6 +54,9 @@ export default function ChatPage() {
   const pendingRpc = useRef<Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
   const currentRunId = useRef<string | null>(null)
   const selectedAgentRef = useRef(selectedAgent)
+
+  // Hydration guard
+  useEffect(() => { setMounted(true) }, [])
 
   // Keep ref in sync
   useEffect(() => {
@@ -277,8 +281,9 @@ export default function ChatPage() {
     }
   }, [rpc, selectedAgent.sessionKey])
 
-  // Connect on mount
+  // Connect on mount (only after hydration)
   useEffect(() => {
+    if (!mounted) return
     connectWs()
     return () => {
       if (wsRef.current) {
@@ -286,11 +291,11 @@ export default function ChatPage() {
         wsRef.current.close()
       }
     }
-  }, [connectWs])
+  }, [connectWs, mounted])
 
   // Load history when connected
   useEffect(() => {
-    if (connected) {
+    if (connected && mounted) {
       setInitialLoading(true)
       loadHistory()
     }
@@ -428,6 +433,14 @@ export default function ChatPage() {
         .replace(/\*([^*]+)\*/g, "<em>$1</em>")
         .replace(/\n/g, "<br/>")
     }).join("")
+  }
+
+  if (!mounted) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <Loader2 className="h-8 w-8 animate-spin text-blue-400" />
+      </div>
+    )
   }
 
   return (
