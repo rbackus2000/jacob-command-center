@@ -269,7 +269,7 @@ export default function ChatPage() {
           .map((m) => ({
             id: m.id || `hist-${Math.random()}`,
             role: m.role as "user" | "assistant",
-            content: m.content,
+            content: typeof m.content === "string" ? m.content : JSON.stringify(m.content || ""),
             created_at: m.ts || m.timestamp || new Date().toISOString(),
           }))
         setMessages(mapped)
@@ -420,6 +420,7 @@ export default function ChatPage() {
   }
 
   function renderContent(text: string) {
+    if (!text || typeof text !== "string") return ""
     const parts = text.split(/(\[Screenshot uploaded: [^\]]+\])/)
     return parts.map((part) => {
       const match = part.match(/\[Screenshot uploaded: ([^\]]+)\]/)
