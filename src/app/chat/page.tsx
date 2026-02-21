@@ -30,7 +30,7 @@ const AGENTS: Agent[] = [
   { id: "anton-osika", name: "Anton", emoji: "⚡", sessionKey: "agent:anton-osika:main" },
 ]
 
-const GATEWAY_URL = process.env.NEXT_PUBLIC_OPENCLAW_GATEWAY_WS_URL || ""
+const GATEWAY_WS_URL = process.env.NEXT_PUBLIC_OPENCLAW_GATEWAY_WS_URL || ""
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_OPENCLAW_GATEWAY_TOKEN || ""
 
 let msgCounter = 0
@@ -45,20 +45,24 @@ export default function ChatPage() {
   const [streamingContent, setStreamingContent] = useState("")
   const [pendingImage, setPendingImage] = useState<{ file: File; preview: string } | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [dragOver, setDragOver] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
-  const pendingRpc = useRef<Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
+  const pendingRpc = useRef<Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
   const currentRunId = useRef<string | null>(null)
+  const selectedAgentRef = useRef(selectedAgent)
+
+  // Keep ref in sync
+  useEffect(() => {
+    selectedAgentRef.current = selectedAgent
+  }, [selectedAgent])
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
       if (scrollRef.current) {
-        scrollRef.current.scrollTo({
-          top: scrollRef.current.scrollHeight,
-          behavior: "smooth",
-        })
+        scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" })
       }
     })
   }, [])
@@ -71,10 +75,9 @@ export default function ChatPage() {
         reject(new Error("WebSocket not connected"))
         return
       }
-      const id = ++msgCounter
+      const id = String(++msgCounter)
       pendingRpc.current.set(id, { resolve, reject })
-      ws.send(JSON.stringify({ id, method, params }))
-      // Timeout after 60s
+      ws.send(JSON.stringify({ type: "req", id, method, params }))
       setTimeout(() => {
         if (pendingRpc.current.has(id)) {
           pendingRpc.current.delete(id)
@@ -84,121 +87,169 @@ export default function ChatPage() {
     })
   }, [])
 
+  // --- Handle incoming WS events ---
+  const handleChatEvent = useCallback((payload: Record<string, unknown>) => {
+    const agent = selectedAgentRef.current
+    if (payload.sessionKey && payload.sessionKey !== agent.sessionKey) return
+
+    console.log("[WS] Chat/Agent event:", payload.type, payload)
+
+    const type = payload.type as string
+
+    if (type === "partial" || type === "delta") {
+      const delta = (payload.delta || payload.content || "") as string
+      setStreamingContent((prev) => prev + delta)
+    } else if (type === "final" || type === "message") {
+      const content = (payload.content || payload.text || "") as string
+      if (content && payload.role === "assistant") {
+        setStreamingContent("")
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: (payload.id as string) || `ws-${Date.now()}`,
+            role: "assistant",
+            content,
+            created_at: new Date().toISOString(),
+          },
+        ])
+        setLoading(false)
+        currentRunId.current = null
+      }
+    } else if (type === "done" || type === "end") {
+      setStreamingContent((prev) => {
+        if (prev && currentRunId.current) {
+          setMessages((msgs) => [
+            ...msgs,
+            {
+              id: `ws-${Date.now()}`,
+              role: "assistant",
+              content: prev,
+              created_at: new Date().toISOString(),
+            },
+          ])
+        }
+        return ""
+      })
+      setLoading(false)
+      currentRunId.current = null
+    } else if (type === "reply") {
+      const content = (payload.content || "") as string
+      if (content) {
+        setStreamingContent("")
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: (payload.id as string) || `ws-${Date.now()}`,
+            role: "assistant",
+            content,
+            created_at: new Date().toISOString(),
+          },
+        ])
+        setLoading(false)
+        currentRunId.current = null
+      }
+    }
+  }, [])
+
   // --- Connect WebSocket ---
   const connectWs = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return
 
-    const wsUrl = GATEWAY_URL.replace(/^http/, "ws")
+    // Convert https:// to wss:// if needed
+    let wsUrl = GATEWAY_WS_URL
+    if (wsUrl.startsWith("https://")) wsUrl = "wss://" + wsUrl.slice(8)
+    else if (wsUrl.startsWith("http://")) wsUrl = "ws://" + wsUrl.slice(7)
+    if (!wsUrl.startsWith("ws")) wsUrl = "wss://" + wsUrl
+
+    console.log("[WS] Connecting to", wsUrl)
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
 
     ws.onopen = () => {
-      // Authenticate
-      ws.send(JSON.stringify({
-        id: ++msgCounter,
-        method: "connect",
-        params: { auth: { token: GATEWAY_TOKEN } }
-      }))
-      setConnected(true)
+      console.log("[WS] Socket open, waiting for challenge...")
     }
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
 
-        // Handle RPC responses
-        if (data.id && pendingRpc.current.has(data.id)) {
-          const { resolve, reject } = pendingRpc.current.get(data.id)!
-          pendingRpc.current.delete(data.id)
-          if (data.error) {
-            reject(new Error(data.error.message || JSON.stringify(data.error)))
-          } else {
-            resolve(data.result)
-          }
+        // Handle connect challenge
+        if (data.type === "event" && data.event === "connect.challenge") {
+          console.log("[WS] Got challenge, sending connect request...")
+          const connectId = String(++msgCounter)
+          pendingRpc.current.set(connectId, {
+            resolve: () => {
+              console.log("[WS] Authenticated!")
+              setConnected(true)
+            },
+            reject: (err: Error) => {
+              console.error("[WS] Auth failed:", err)
+              setConnected(false)
+            },
+          })
+          ws.send(JSON.stringify({
+            type: "req",
+            id: connectId,
+            method: "connect",
+            params: {
+              minProtocol: 3,
+              maxProtocol: 3,
+              client: {
+                id: "jacob-dashboard",
+                version: "1.0.0",
+                platform: "web",
+                mode: "operator",
+              },
+              role: "operator",
+              scopes: ["operator.read", "operator.write"],
+              caps: [],
+              commands: [],
+              permissions: {},
+              auth: { token: GATEWAY_TOKEN },
+              locale: "en-US",
+              userAgent: "jacob-command-center/1.0.0",
+            },
+          }))
           return
         }
 
-        // Handle chat events (streaming responses)
-        if (data.method === "chat" || data.event === "chat") {
-          const payload = data.params || data
-          if (payload.sessionKey !== selectedAgent.sessionKey) return
-
-          if (payload.type === "partial" || payload.type === "delta") {
-            // Streaming content
-            setStreamingContent((prev) => prev + (payload.delta || payload.content || ""))
-          } else if (payload.type === "final" || payload.type === "message") {
-            // Final message
-            const content = payload.content || payload.text || ""
-            if (content && payload.role === "assistant") {
-              setStreamingContent("")
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: payload.id || `ws-${Date.now()}`,
-                  role: "assistant",
-                  content,
-                  created_at: new Date().toISOString(),
-                },
-              ])
-              setLoading(false)
-              currentRunId.current = null
+        // Handle RPC responses
+        if (data.type === "res" && data.id) {
+          const id = String(data.id)
+          if (pendingRpc.current.has(id)) {
+            const { resolve, reject } = pendingRpc.current.get(id)!
+            pendingRpc.current.delete(id)
+            if (data.ok === false || data.error) {
+              reject(new Error(data.error?.message || data.payload?.message || JSON.stringify(data.error || data.payload)))
+            } else {
+              resolve(data.payload || data.result)
             }
-          } else if (payload.type === "done" || payload.type === "end") {
-            // Run finished — if we have streaming content, commit it
-            if (currentRunId.current) {
-              setStreamingContent((prev) => {
-                if (prev) {
-                  setMessages((msgs) => [
-                    ...msgs,
-                    {
-                      id: `ws-${Date.now()}`,
-                      role: "assistant",
-                      content: prev,
-                      created_at: new Date().toISOString(),
-                    },
-                  ])
-                }
-                return ""
-              })
-              setLoading(false)
-              currentRunId.current = null
-            }
+            return
           }
         }
 
-        // Handle agent events 
-        if (data.method === "agent" || data.event === "agent") {
-          const payload = data.params || data
-          if (payload.type === "reply" && payload.content) {
-            setStreamingContent("")
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: payload.id || `ws-${Date.now()}`,
-                role: "assistant",
-                content: payload.content,
-                created_at: new Date().toISOString(),
-              },
-            ])
-            setLoading(false)
-            currentRunId.current = null
-          }
+        // Handle streaming events
+        if (data.type === "event" && (data.event === "chat" || data.event === "agent")) {
+          const payload = data.payload || data.params || {}
+          handleChatEvent(payload)
+          return
         }
-      } catch {
-        // Ignore parse errors
+      } catch (err) {
+        console.error("[WS] Parse error:", err)
       }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
+      console.log("[WS] Closed:", e.code, e.reason)
       setConnected(false)
-      // Reconnect after 3s
       setTimeout(connectWs, 3000)
     }
 
-    ws.onerror = () => {
+    ws.onerror = (err) => {
+      console.error("[WS] Error:", err)
       setConnected(false)
     }
-  }, [selectedAgent.sessionKey])
+  }, [handleChatEvent])
 
   // --- Load history via WS RPC ---
   const loadHistory = useCallback(async () => {
@@ -226,18 +277,18 @@ export default function ChatPage() {
     }
   }, [rpc, selectedAgent.sessionKey])
 
-  // Connect WS on mount
+  // Connect on mount
   useEffect(() => {
     connectWs()
     return () => {
       if (wsRef.current) {
-        wsRef.current.onclose = null // prevent reconnect on unmount
+        wsRef.current.onclose = null
         wsRef.current.close()
       }
     }
   }, [connectWs])
 
-  // Load history when connected or agent changes
+  // Load history when connected
   useEffect(() => {
     if (connected) {
       setInitialLoading(true)
@@ -245,9 +296,7 @@ export default function ChatPage() {
     }
   }, [connected, loadHistory])
 
-  useEffect(() => {
-    scrollToBottom()
-  }, [messages, loading, streamingContent, scrollToBottom])
+  useEffect(() => { scrollToBottom() }, [messages, loading, streamingContent, scrollToBottom])
 
   // Paste handler for images
   useEffect(() => {
@@ -258,9 +307,7 @@ export default function ChatPage() {
         if (item.type.startsWith("image/")) {
           e.preventDefault()
           const file = item.getAsFile()
-          if (file) {
-            setPendingImage({ file, preview: URL.createObjectURL(file) })
-          }
+          if (file) setPendingImage({ file, preview: URL.createObjectURL(file) })
           return
         }
       }
@@ -268,8 +315,6 @@ export default function ChatPage() {
     document.addEventListener("paste", handlePaste)
     return () => document.removeEventListener("paste", handlePaste)
   }, [])
-
-  const [dragOver, setDragOver] = useState(false)
 
   function handleDrop(e: React.DragEvent) {
     e.preventDefault()
@@ -287,15 +332,8 @@ export default function ChatPage() {
       formData.append("file", file)
       const res = await fetch("/api/chat/upload", { method: "POST", body: formData })
       const data = await res.json()
-      if (data.url) return data.url
-      console.error("Upload error:", data.error)
-      return null
-    } catch (err) {
-      console.error("Upload failed:", err)
-      return null
-    } finally {
-      setUploading(false)
-    }
+      return data.url || null
+    } catch { return null } finally { setUploading(false) }
   }
 
   function clearPendingImage() {
@@ -310,13 +348,6 @@ export default function ChatPage() {
     setMessages([])
     setStreamingContent("")
     setInitialLoading(true)
-    // Reconnect WS to pick up new agent's events
-    if (wsRef.current) {
-      wsRef.current.onclose = null
-      wsRef.current.close()
-    }
-    wsRef.current = null
-    // Will reconnect via useEffect
   }
 
   async function sendMessage() {
@@ -328,7 +359,6 @@ export default function ChatPage() {
     setLoading(true)
     setStreamingContent("")
 
-    // Upload image first if present
     let imageUrl: string | null = null
     if (pendingImage) {
       imageUrl = await uploadImage(pendingImage.file)
@@ -337,44 +367,34 @@ export default function ChatPage() {
 
     let content = text
     if (imageUrl) {
-      const imageTag = `[Screenshot uploaded: ${imageUrl}]`
-      content = text ? `${text}\n\n${imageTag}` : imageTag
+      const tag = `[Screenshot uploaded: ${imageUrl}]`
+      content = text ? `${text}\n\n${tag}` : tag
     }
+    if (!content) { setLoading(false); return }
 
-    if (!content) {
-      setLoading(false)
-      return
-    }
-
-    // Add user message optimistically
-    const tempUserMsg: Message = {
-      id: "temp-" + Date.now(),
-      role: "user",
-      content,
-      created_at: new Date().toISOString(),
-    }
-    setMessages((prev) => [...prev, tempUserMsg])
+    // Optimistic user message
+    setMessages((prev) => [
+      ...prev,
+      { id: "temp-" + Date.now(), role: "user", content, created_at: new Date().toISOString() },
+    ])
 
     try {
       const result = await rpc("chat.send", {
         sessionKey: selectedAgent.sessionKey,
         content,
-      }) as { runId?: string; status?: string }
+      }) as { runId?: string }
 
       if (result?.runId) {
         currentRunId.current = result.runId
       }
-
-      // If status is already "ok" with no runId, the response might come synchronously
-      // The streaming events will handle the response
     } catch (error) {
-      console.error("Failed to send:", error)
+      console.error("Send failed:", error)
       setMessages((prev) => [
         ...prev,
         {
           id: `err-${Date.now()}`,
           role: "assistant",
-          content: `⚠️ Failed to send message: ${error instanceof Error ? error.message : "Unknown error"}`,
+          content: `⚠️ ${error instanceof Error ? error.message : "Failed to send"}`,
           created_at: new Date().toISOString(),
         },
       ])
@@ -383,10 +403,7 @@ export default function ChatPage() {
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault()
-      sendMessage()
-    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage() }
   }
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
@@ -399,20 +416,18 @@ export default function ChatPage() {
 
   function renderContent(text: string) {
     const parts = text.split(/(\[Screenshot uploaded: [^\]]+\])/)
-    return parts
-      .map((part) => {
-        const match = part.match(/\[Screenshot uploaded: ([^\]]+)\]/)
-        if (match) {
-          return `<div class="my-2"><img src="${match[1]}" alt="Screenshot" class="max-w-full rounded-lg max-h-[300px] object-contain" /></div>`
-        }
-        return part
-          .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="bg-black/40 rounded-lg p-3 my-2 overflow-x-auto text-sm"><code>$2</code></pre>')
-          .replace(/`([^`]+)`/g, '<code class="bg-black/30 px-1.5 py-0.5 rounded text-sm text-blue-300">$1</code>')
-          .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-          .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-          .replace(/\n/g, "<br/>")
-      })
-      .join("")
+    return parts.map((part) => {
+      const match = part.match(/\[Screenshot uploaded: ([^\]]+)\]/)
+      if (match) {
+        return `<div class="my-2"><img src="${match[1]}" alt="Screenshot" class="max-w-full rounded-lg max-h-[300px] object-contain" /></div>`
+      }
+      return part
+        .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="bg-black/40 rounded-lg p-3 my-2 overflow-x-auto text-sm"><code>$2</code></pre>')
+        .replace(/`([^`]+)`/g, '<code class="bg-black/30 px-1.5 py-0.5 rounded text-sm text-blue-300">$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+        .replace(/\n/g, "<br/>")
+    }).join("")
   }
 
   return (
@@ -422,7 +437,6 @@ export default function ChatPage() {
       onDragLeave={() => setDragOver(false)}
       onDrop={handleDrop}
     >
-      {/* Drag overlay */}
       {dragOver && (
         <div className="absolute inset-0 z-50 bg-blue-500/10 border-2 border-dashed border-blue-400 rounded-xl flex items-center justify-center backdrop-blur-sm">
           <div className="text-center">
@@ -442,24 +456,17 @@ export default function ChatPage() {
             <h1 className="text-lg font-semibold text-white" style={{ fontFamily: "'Playfair Display', serif" }}>
               Chat with {selectedAgent.name}
             </h1>
-            <p className="text-xs text-muted-foreground">Direct Gateway WebSocket connection</p>
+            <p className="text-xs text-muted-foreground">Direct Gateway connection</p>
           </div>
           <div className="ml-auto flex items-center gap-2">
             {connected ? (
-              <>
-                <Wifi className="h-4 w-4 text-green-400" />
-                <span className="text-xs text-green-400">Connected</span>
-              </>
+              <><Wifi className="h-4 w-4 text-green-400" /><span className="text-xs text-green-400">Connected</span></>
             ) : (
-              <>
-                <WifiOff className="h-4 w-4 text-red-400" />
-                <span className="text-xs text-red-400">Reconnecting...</span>
-              </>
+              <><WifiOff className="h-4 w-4 text-red-400" /><span className="text-xs text-red-400">Reconnecting...</span></>
             )}
           </div>
         </div>
 
-        {/* Agent Selector */}
         <div className="flex gap-2 overflow-x-auto pb-2 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
           {AGENTS.map((agent) => (
             <button
@@ -529,13 +536,8 @@ export default function ChatPage() {
           </AnimatePresence>
         )}
 
-        {/* Streaming response */}
         {streamingContent && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="flex gap-3"
-          >
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-3">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-500/20 border border-blue-500/30">
               <Bot className="h-4 w-4 text-blue-400" />
             </div>
@@ -546,13 +548,8 @@ export default function ChatPage() {
           </motion.div>
         )}
 
-        {/* Loading dots */}
         {loading && !streamingContent && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="flex gap-3"
-          >
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-3">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-500/20 border border-blue-500/30">
               <Bot className="h-4 w-4 text-blue-400" />
             </div>
@@ -567,22 +564,11 @@ export default function ChatPage() {
         )}
       </div>
 
-      {/* Pending image preview */}
       {pendingImage && (
         <div className="border-t border-white/10 bg-black/20 px-4 pt-3">
           <div className="relative inline-block">
-            <Image
-              src={pendingImage.preview}
-              alt="Pending upload"
-              width={120}
-              height={120}
-              className="rounded-lg object-cover h-[80px] w-auto"
-              unoptimized
-            />
-            <button
-              onClick={clearPendingImage}
-              className="absolute -top-2 -right-2 bg-red-500 rounded-full p-0.5 hover:bg-red-600 transition-colors"
-            >
+            <Image src={pendingImage.preview} alt="Pending" width={120} height={120} className="rounded-lg object-cover h-[80px] w-auto" unoptimized />
+            <button onClick={clearPendingImage} className="absolute -top-2 -right-2 bg-red-500 rounded-full p-0.5 hover:bg-red-600 transition-colors">
               <X className="h-3 w-3 text-white" />
             </button>
             {uploading && (
@@ -597,20 +583,8 @@ export default function ChatPage() {
       {/* Input */}
       <div className="border-t border-white/10 bg-black/20 backdrop-blur-xl p-4">
         <div className="flex gap-3 items-end max-w-4xl mx-auto">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={handleFileSelect}
-          />
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-11 w-11 shrink-0 text-muted-foreground hover:text-blue-400"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={loading}
-          >
+          <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileSelect} />
+          <Button variant="ghost" size="icon" className="h-11 w-11 shrink-0 text-muted-foreground hover:text-blue-400" onClick={() => fileInputRef.current?.click()} disabled={loading}>
             <ImagePlus className="h-5 w-5" />
           </Button>
           <Textarea
