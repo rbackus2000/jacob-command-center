@@ -386,7 +386,8 @@ export default function ChatPage() {
     try {
       const result = await rpc("chat.send", {
         sessionKey: selectedAgent.sessionKey,
-        content,
+        message: content,
+        idempotencyKey: `dash-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       }) as { runId?: string }
 
       if (result?.runId) {
