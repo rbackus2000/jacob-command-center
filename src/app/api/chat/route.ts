@@ -26,6 +26,8 @@ export async function POST(req: NextRequest) {
   })
 
   // Send to gateway via HTTP chat completions
+  // NOTE: Do NOT set x-openclaw-session-key to the main session — it will queue
+  // behind any active agent turn and hang. Let the Gateway create an ephemeral session.
   let assistantContent: string
   try {
     const response = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
@@ -33,7 +35,6 @@ export async function POST(req: NextRequest) {
       headers: {
         "Authorization": `Bearer ${GATEWAY_TOKEN}`,
         "Content-Type": "application/json",
-        "x-openclaw-session-key": sessionKey,
       },
       body: JSON.stringify({
         model: `openclaw:${agentId}`,
