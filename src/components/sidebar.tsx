@@ -11,6 +11,7 @@ import {
   FolderKanban,
   Settings,
   Bot,
+  TrendingUp,
 } from "lucide-react"
 import { Separator } from "@/components/ui/separator"
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
@@ -21,6 +22,7 @@ const navItems = [
   { href: "/knowledge", label: "Knowledge Base", icon: BookOpen },
   { href: "/memory", label: "Memory", icon: Brain },
   { href: "/projects", label: "Projects", icon: FolderKanban },
+  { href: "/trading", label: "Trading", icon: TrendingUp },
   { href: "/settings", label: "Settings", icon: Settings },
 ]
 
