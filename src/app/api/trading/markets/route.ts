@@ -11,14 +11,24 @@ async function getKalshiAuthHeaders(method: string, apiPath: string) {
   const apiKey = process.env.KALSHI_API_KEY
   if (!apiKey) throw new Error("KALSHI_API_KEY not set")
 
-  const keyPath = path.join(
-    process.env.HOME || "/root",
-    ".openclaw/workspace/.kalshi-private-key.pem"
-  )
-  const privateKeyPem = await fs.readFile(keyPath, "utf-8")
+  // Try env var first (for Vercel), fallback to file (for local/server)
+  let privateKeyPem = process.env.KALSHI_PRIVATE_KEY?.replace(/\\n/g, "\n")
+  if (!privateKeyPem) {
+    try {
+      const keyPath = path.join(
+        process.env.HOME || "/root",
+        ".openclaw/workspace/.kalshi-private-key.pem"
+      )
+      privateKeyPem = await fs.readFile(keyPath, "utf-8")
+    } catch {
+      throw new Error("KALSHI_PRIVATE_KEY not set and key file not found")
+    }
+  }
 
   const timestampMs = Date.now()
-  const message = `${timestampMs}${method.toUpperCase()}${apiPath}`
+  // Kalshi requires full path with /trade-api/v2 prefix for signing
+  const fullPath = `/trade-api/v2${apiPath}`
+  const message = `${timestampMs}${method.toUpperCase()}${fullPath}`
 
   const signature = crypto
     .sign("sha256", Buffer.from(message), {
@@ -62,19 +72,22 @@ export async function GET() {
 
     const data = await res.json()
 
-    // Transform to our format
+    // Transform to our format — Kalshi API returns dollar strings
     const markets = (data.markets || []).map((m: Record<string, unknown>) => ({
       ticker: m.ticker,
       title: m.title,
-      subtitle: m.subtitle || "",
-      yes_bid: m.yes_bid != null ? Number(m.yes_bid) / 100 : null,
-      yes_ask: m.yes_ask != null ? Number(m.yes_ask) / 100 : null,
-      no_bid: m.no_bid != null ? Number(m.no_bid) / 100 : null,
-      no_ask: m.no_ask != null ? Number(m.no_ask) / 100 : null,
-      volume: m.volume || 0,
+      subtitle: m.yes_sub_title || m.no_sub_title || "",
+      yes_bid: parseFloat(String(m.yes_bid_dollars || "0")),
+      yes_ask: parseFloat(String(m.yes_ask_dollars || "0")),
+      no_bid: parseFloat(String(m.no_bid_dollars || "0")),
+      no_ask: parseFloat(String(m.no_ask_dollars || "0")),
+      volume: parseFloat(String(m.volume_fp || "0")),
+      open_interest: parseFloat(String(m.open_interest_fp || "0")),
+      last_price: parseFloat(String(m.last_price_dollars || "0")),
       close_time: m.close_time,
       category: m.category || "",
       status: m.status,
+      series: m.event_ticker || "",
     }))
 
     return NextResponse.json({ markets })
